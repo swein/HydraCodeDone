@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  hydracodedone:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hydracodedone
+    ports:
+      - "3101:3101"
+    env_file:
+      - .env # This will load variables from your .env file into the container
+    # If you need to mount volumes, for example, if logs were written to a file:
+    # volumes:
+    #   - ./logs:/app/logs 
+    restart: unless-stopped
+    # Healthcheck can be added if your app has a health endpoint
+    # healthcheck:
+    #   test: ["CMD", "curl", "-f", "http://localhost:3101/health"]
+    #   interval: 30s
+    #   timeout: 10s
+    #   retries: 3
+    #   start_period: 30s # Give some time for the app to start
+
+  ollama_service:
+    image: ollama/ollama:latest
+    container_name: ollama_service
+    ports:
+      - "11434:11434" # Expose Ollama on host port 11434
+    volumes:
+    restart: unless-stopped
+    # If you have an NVIDIA GPU and want to use it with Ollama:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           capabilities: [gpu]
+    #           count: all # or specify a GPU ID
