@@ -1,5 +1,6 @@
 import logging
 import uuid
+import json
 import time
 from fastapi import FastAPI, HTTPException, Request as FastAPIRequest # Renamed to avoid conflict
 from .models.openai_types import (
@@ -9,7 +10,12 @@ from .models.openai_types import (
     create_default_usage
 )
 from openai.types.chat import ChatCompletionMessage as OpenAIChatCompletionMessage # For type hinting internal messages
-from .services.llm_clients import call_ollama_chat_model, LLMConnectionError, LLMResponseError
+from .services.llm_clients import (
+    call_ollama_chat_model,
+    stream_ollama_chat_model,
+    LLMConnectionError,
+    LLMResponseError,
+)
 from .services.critique_service import prepare_critique_messages
 from .core.config import settings
 from .core.logging_config import setup_logging
@@ -31,16 +37,72 @@ async def health_check():
     """
     return {"status": "ok"}
 
-@app.post("/v1/chat/completions", response_model=OpenAIChatCompletion, tags=["Chat"])
-async def chat_completions(request: ChatCompletionRequest, http_request: FastAPIRequest): # Added http_request for client info
+
+@app.get("/v1/health", tags=["Health"])
+async def openai_health_check():
+    """OpenAI-style health probe expected by some clients (Continue.dev)."""
+    return {"status": "ok"}
+
+
+@app.get("/v1/models", tags=["Models"])
+async def list_models():
+    """Minimal subset of the OpenAI `List models` endpoint."""
+    models = [{"id": settings.PRIMARY_MODEL_NAME, "object": "model"}]
+    if settings.CRITIQUE_MODEL_NAME and settings.CRITIQUE_MODEL_NAME not in {settings.PRIMARY_MODEL_NAME}:
+        models.append({"id": settings.CRITIQUE_MODEL_NAME, "object": "model"})
+    return {"object": "list", "data": models}
+
+from fastapi.responses import StreamingResponse
+
+@app.post("/v1/chat/completions", tags=["Chat"])
+async def chat_completions(request: ChatCompletionRequest, http_request: FastAPIRequest):
     client_host = http_request.client.host if http_request.client else "unknown_client"
-    logger.info(f"Received chat completion request from {client_host} for model {request.model}")
+    logger.info(f"Received chat completion request from {client_host} for model {request.model}, stream={request.stream}")
     """
     OpenAI-compatible chat completions endpoint.
     This endpoint takes a user request, calls a primary LLM (Model 1 via Ollama),
     and returns its response. Critique (Model 2) is not yet implemented.
     """
 
+
+    # Fast path for streaming
+    if request.stream:
+        async def event_stream():
+            chunk_iter = stream_ollama_chat_model(
+                messages=request.messages,
+                model_name=settings.PRIMARY_MODEL_NAME,
+                ollama_base_url=settings.OLLAMA_BASE_URL,
+                temperature=request.temperature,
+            )
+            async for chunk in chunk_iter:
+                if chunk.get("done"):
+                    # send finish reason then DONE marker
+                    finish = {
+                        "id": f"chatcmpl-{uuid.uuid4().hex}",
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": request.model,
+                        "choices": [
+                            {"index": 0, "delta": {}, "finish_reason": "stop"}
+                        ],
+                    }
+                    yield f"data: {json.dumps(finish, ensure_ascii=False)}\n\n"
+                    yield "data: [DONE]\n\n"
+                    break
+                token = chunk.get("message", {}).get("content", "")
+                if not token:
+                    continue
+                data = {
+                    "id": f"chatcmpl-{uuid.uuid4().hex}",
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": request.model,
+                    "choices": [
+                        {"index": 0, "delta": {"content": token}, "finish_reason": None}
+                    ],
+                }
+                yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
 
     final_assistant_message: OpenAIChatCompletionMessage
 
@@ -116,3 +178,9 @@ async def chat_completions(request: ChatCompletionRequest, http_request: FastAPI
     )
     logger.info(f"Successfully processed chat completion request from {client_host} for model {request.model}. Returning refined response.")
     return response
+
+
+# Alias without the /v1 prefix because some clients (e.g., Continue.dev) call it directly.
+@app.post("/chat/completions", response_model=OpenAIChatCompletion, tags=["Chat"])
+async def chat_completions_alias(request: ChatCompletionRequest, http_request: FastAPIRequest):
+    return await chat_completions(request, http_request)

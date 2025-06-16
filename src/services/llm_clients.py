@@ -1,6 +1,7 @@
 import httpx
 import logging
-from typing import List, Optional, Dict, Any
+import json
+from typing import List, Optional, Dict, Any, AsyncIterator
 
 from ..models.openai_types import CustomChatCompletionMessage # For input
 from openai.types.chat import ChatCompletionMessage as OpenAIChatCompletionMessage # For output
@@ -66,7 +67,7 @@ async def call_ollama_chat_model(
 
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.post(api_url, json=payload, timeout=60.0) # Added a timeout
+            response = await client.post(api_url, json=payload, timeout=120.0) # Added a timeout
             response.raise_for_status()  # Raises HTTPStatusError for 4xx/5xx responses
 
     except httpx.RequestError as e:
@@ -110,9 +111,80 @@ async def call_ollama_chat_model(
         # Construct the official OpenAI ChatCompletionMessage for the response
         return OpenAIChatCompletionMessage(role=role, content=content)
 
-    except ValueError as e: # JSONDecodeError is a subclass of ValueError
-        logger.error(f"Failed to decode JSON response from Ollama model '{model_name}': {e}. Response text: {response.text}", exc_info=True)
-        raise LLMResponseError(f"Failed to decode JSON response from Ollama: {e}. Response text: {response.text}") from e
+    except ValueError as e:  # JSONDecodeError is a subclass of ValueError
+        logger.error(
+            f"Failed to decode JSON response from Ollama model '{model_name}': {e}. Response text: {response.text}",
+            exc_info=True,
+        )
+        raise LLMResponseError(
+            f"Failed to decode JSON response from Ollama: {e}. Response text: {response.text}"
+        ) from e
     except KeyError as e:
-        logger.error(f"Missing expected key {e} in Ollama response for model '{model_name}': {response_data}", exc_info=True)
-        raise LLMResponseError(f"Missing expected key {e} in Ollama response: {response_data}") from e
+        logger.error(
+            f"Missing expected key {e} in Ollama response for model '{model_name}': {response_data}",
+            exc_info=True,
+        )
+        raise LLMResponseError(
+            f"Missing expected key {e} in Ollama response: {response_data}"
+        ) from e
+
+# ---------------------------------------------------------------------------
+# Streaming Support
+# ---------------------------------------------------------------------------
+async def stream_ollama_chat_model(
+    messages: List[CustomChatCompletionMessage],
+    model_name: str,
+    ollama_base_url: str,
+    temperature: Optional[float] = 0.7,
+) -> AsyncIterator[dict]:
+    """Stream responses from Ollama as they arrive.
+
+    Yields each JSON chunk emitted by Ollama. Caller is responsible for
+    converting these chunks to the desired wire format (e.g. OpenAI SSE).
+    """
+    api_url = f"{ollama_base_url.rstrip('/')}/api/chat"
+
+    ollama_messages = [{"role": m.role, "content": m.content} for m in messages]
+
+    payload: Dict[str, Any] = {
+        "model": model_name,
+        "messages": ollama_messages,
+        "stream": True,
+    }
+    if temperature is not None:
+        payload.setdefault("options", {}).update({"temperature": temperature})
+
+    try:
+        async with httpx.AsyncClient() as client:
+            async with client.stream("POST", api_url, json=payload, timeout=120.0) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line:
+                        continue  # skip keep-alive blanks
+                    try:
+                        chunk = json.loads(line)
+                    except json.JSONDecodeError:
+                        logger.warning("Failed to decode streaming line from Ollama: %s", line)
+                        continue
+                    yield chunk
+    except httpx.RequestError as e:
+        logger.error(f"httpx.RequestError (stream) calling Ollama model '{model_name}' at {api_url}: {e}")
+        raise LLMConnectionError(f"Error connecting to Ollama at {api_url}: {e}") from e
+    except httpx.HTTPStatusError as e:
+        error_detail = e.response.text
+        try:
+            error_json = e.response.json()
+            error_detail = error_json.get("error", error_detail)
+        except ValueError:
+            pass
+        logger.error(
+            "httpx.HTTPStatusError (stream) calling Ollama model '%s'. Status: %s, Response: %s",
+            model_name,
+            e.response.status_code,
+            error_detail,
+        )
+        raise LLMResponseError(
+            f"Ollama API request failed with status {e.response.status_code} at {api_url}: {error_detail}"
+        )
+
+

@@ -21,19 +21,3 @@ services:
     #   timeout: 10s
     #   retries: 3
     #   start_period: 30s # Give some time for the app to start
-
-  ollama_service:
-    image: ollama/ollama:latest
-    container_name: ollama_service
-    ports:
-      - "11434:11434" # Expose Ollama on host port 11434
-    volumes:
-    restart: unless-stopped
-    # If you have an NVIDIA GPU and want to use it with Ollama:
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           capabilities: [gpu]
-    #           count: all # or specify a GPU ID
