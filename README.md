@@ -77,7 +77,7 @@ Example `curl` request:
 curl -X POST "http://localhost:3101/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "'$PRIMARY_MODEL_NAME'",  /* replace or export env var */
+    "model": "hydracodedone",
     "stream": true,
     "messages": [
       {"role": "user", "content": "What is Ruby?"}
@@ -94,7 +94,6 @@ Unit and integration tests (covering both non-streaming and streaming code paths
     python -m venv .venv
     source .venv/bin/activate
     pip install -r requirements.txt
-    pip install -r requirements-dev.txt # For pytest and other dev tools
     ```
 2.  **Run tests** from the project root:
     ```bash
